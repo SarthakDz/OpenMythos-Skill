@@ -27,7 +27,7 @@ Once triggered, Claude reasons with:
 - **The eight non-negotiable invariants.** `ρ(A) < 1` by construction, `e` frozen across loops, MoE only in the recurrent block, LM-head weight tying, causal-mask dtype matching activation dtype, loop-index embedding occupying `dim // 8` channels, the ACT remainder trick with `still_running` gating, and not breaking the recurrent loop when a KV cache is present. Silently violating any of these makes the model fail in characteristic ways.
 - **The debugging playbook.** A symptom-to-cause map. "Loss spikes at a reproducible step" → check `model.recurrent.injection.get_A().max()` first. "Output quality degrades past N loops" → overthinking, lower `act_threshold`. "KV cache error on decode step 2+" → someone probably added a `break` that shouldn't be there.
 - **Variant-scaling discipline.** The relationship between `dim`, `n_heads`, `expert_dim`, `n_shared_experts`, and `lora_rank` across the 1B → 1T variants, with the parameter-budget formula from `variants.py`'s header comment.
-- **Training-script conventions.** AdamW, 2000-step warmup, FineWeb-Edu sharded streaming, bf16 on H100/A100 vs float16 + GradScaler on older hardware, DDP via `torchrun`.
+- **Training-script conventions.** AdamW, 2000-step warmup, FineWeb-Edu sharded streaming, bf16 when supported else fp16 (the reference script uses no GradScaler), FSDP under `torchrun` with `model.clip_grad_norm_`.
 - **Honesty about the project's status.** OpenMythos is an *independent theoretical reconstruction*. The skill is explicit about not claiming this is Anthropic's actual internal architecture.
 
 There is also a **small optional appendix** in SKILL.md for users who want Claude to structure its reasoning in a Prelude → Loop → Coda shape (a prompting pattern loosely inspired by the RDT's forward pass). This is **off by default**, only activates on explicit request ("Mythos mode", "think like Mythos"), and is documented honestly — it's an aesthetic experiment, not a capability claim. A markdown file can't make Claude's weights loop, and the skill says so. If that framing bothers you, delete the appendix; the codebase-expert part of the skill stands on its own.
@@ -37,12 +37,15 @@ There is also a **small optional appendix** in SKILL.md for users who want Claud
 ## Installation
 
 ```
-openmythos-skill/
+openmythos/
 ├── SKILL.md       (the skill)
-└── README.md      (this file)
+├── README.md      (this file)
+└── LICENSE
 ```
 
-Drop the folder into wherever your Claude client loads skills from. Claude picks the skill up on its next turn and fires it when a trigger matches.
+Name the folder `openmythos` (it must match the `name:` in `SKILL.md`) and put it where your Claude client loads skills from. For Claude Code that is `~/.claude/skills/openmythos/` (all projects) or `<your-project>/.claude/skills/openmythos/` (one project). Claude picks the skill up on its next turn and fires it when a trigger matches.
+
+Keep the `description:` in the `SKILL.md` frontmatter as a single double-quoted line. An unquoted `word: word` inside it is invalid YAML, and the client then shows only the skill name instead of your trigger text.
 
 ---
 
@@ -64,7 +67,7 @@ def log_spectral(model, step):
     print(f"step {step}  max(A)={A.max().item():.4f}")
 ```
 
-It explains *why* the `A = exp(-exp(log_dt + log_A).clamp(-20, 20))` reparameterization is supposed to make this impossible — and therefore why seeing `max(A)` creep toward 1 is a strong signal someone has modified `LTIInjection`. It orders the remaining candidates by repo-specific prior probability (gradient explosion through a 16-iteration loop, then warmup geometry × bf16 × loop-depth interaction), and rules out the less-likely pitfalls (`e` being accidentally recomputed inside the loop, a single bad FineWeb-Edu sample).
+It explains *why* the `A = exp(-exp((log_dt + log_A).clamp(-20, 20)))` reparameterization keeps `A` strictly inside (0, 1) — and therefore why a `max(A)` reading of exactly `1.0000` needs a fp32 recompute before blaming anything: either the float format rounded it (fp32 does so once `log_dt + log_A < -17.3`, bf16 above ~0.998), or a channel's decay really went to ~0, or someone modified `LTIInjection`. It orders the remaining candidates by repo-specific prior probability (gradient explosion through a 16-iteration loop, then warmup geometry × bf16 × loop-depth interaction), and rules out the less-likely pitfalls (`e` being accidentally recomputed inside the loop, a single bad FineWeb-Edu sample).
 
 The difference worth noticing: the with-skill answer routes the user to the specific 30-second diagnostic that actually distinguishes the most likely cause from the less likely ones. The without-skill answer routes the user toward an afternoon of general-purpose LR and gradient experiments that would eventually converge on the same answer, the slow way.
 
@@ -91,7 +94,7 @@ This is a real test. The one in the README is a sketch.
 - **No architecture swap.** Claude's weights and attention are fixed. The skill is a prompt, not a model edit. The optional "Mythos reasoning mode" appendix is a structural prompting pattern loosely inspired by the RDT forward pass; whether it improves answer quality over Claude's default reasoning is an open empirical question that has not been rigorously tested. The SKILL.md file is explicit about this.
 - **OpenMythos itself is theoretical.** It's an independent reconstruction of what Claude Mythos *might* look like based on public research. The skill does not claim this is Anthropic's actual internal architecture, and if a user conflates the two, Claude is instructed to correct them.
 - **Validation here is illustrative, not rigorous.** The example above was produced by me answering the same prompt twice with full knowledge of the skill. A clean evaluation would run two independent Claude instances (one with the skill, one without) and have a third party grade them blind. I haven't done that. If you want evidence, the "run your own comparison" section above is how.
-- **The triggering is intentionally aggressive.** Skills tend to under-trigger in practice, so the frontmatter description is written to fire on any concrete signal (filename, import, symbol name, variant helper). If you find it triggering on prompts where it shouldn't, tighten the negative-trigger clause at the end of the description. The skill is 248 lines of markdown — easy to edit.
+- **The triggering is intentionally aggressive.** Skills tend to under-trigger in practice, so the frontmatter description is written to fire on any concrete signal (filename, import, symbol name, variant helper). If you find it triggering on prompts where it shouldn't, tighten the negative-trigger clause at the end of the description. `SKILL.md` is about 165 lines of markdown — easy to edit.
 - **The optional appendix can be deleted.** If you prefer a cleaner skill that is only the codebase expert, remove everything from `## Optional experimental appendix` to the end of the file. The rest of the skill stands on its own and is the part that pulls the weight.
 
 ---
